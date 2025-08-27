@@ -1,0 +1,384 @@
+<script>
+    const skills = {
+        'Attack': { eph: 65000, color: '#CD853F', method: 'Dharoks NMZ' },
+        'Strength': { eph: 65000, color: '#228B22', method: 'Dharoks NMZ' },
+        'Defence': { eph: 65000, color: '#4682B4', method: 'Dharoks NMZ' },
+        'Ranged': { eph: 400000, color: '#9ACD32', method: 'Chinning MM2' },
+        'Prayer': { eph: 600000, color: '#FFD700', method: 'D bones gilded altar' },
+        'Magic': { eph: 300000, color: '#8A2BE2', method: 'Bursting MM2' },
+        'Runecrafting': { eph: 65000, color: '#DAA520', method: 'Lavas with runners' },
+        'Construction': { eph: 900000, color: '#8B4513', method: 'Mahogany tables' },
+        'Hitpoints': { eph: 18000, color: '#DC143C', method: 'From combat training' },
+        'Agility': { eph: 62000, color: '#00CED1', method: 'Hallowed Sepulchre' },
+        'Herblore': { eph: 450000, color: '#32CD32', method: 'Efficient potions' },
+        'Thieving': { eph: 280000, color: '#800080', method: 'Blackjacking/PP' },
+        'Crafting': { eph: 430000, color: '#DEB887', method: 'Superglass make' },
+        'Fletching': { eph: 950000, color: '#00FF7F', method: 'Darts' },
+        'Slayer': { eph: 38000, color: '#000000', method: 'Efficient slayer' },
+        'Hunter': { eph: 170000, color: '#8B4513', method: 'Red/Black chins' },
+        'Mining': { eph: 95000, color: '#696969', method: '3t4g granite' },
+        'Smithing': { eph: 380000, color: '#B22222', method: 'BF gold bars' },
+        'Fishing': { eph: 110000, color: '#4169E1', method: '3t barbarian' },
+        'Cooking': { eph: 500000, color: '#FF6347', method: 'Wines' },
+        'Firemaking': { eph: 450000, color: '#FF4500', method: 'Redwood logs' },
+        'Woodcutting': { eph: 150000, color: '#228B22', method: '3t teaks' },
+        'Farming': { eph: 550000, color: '#9ACD32', method: 'Tree runs (avg)' }
+    };
+
+    // Skill order as returned by OSRS highscores API
+    const highscoreSkillOrder = [
+        'Overall', 'Attack', 'Defence', 'Strength', 'Hitpoints', 'Ranged', 'Prayer', 'Magic',
+        'Cooking', 'Woodcutting', 'Fletching', 'Fishing', 'Firemaking', 'Crafting', 'Smithing',
+        'Mining', 'Herblore', 'Agility', 'Thieving', 'Slayer', 'Farming', 'Runecrafting', 'Hunter', 'Construction'
+    ];
+
+    // ---------- New: robust fetch helpers and fallbacks ----------
+
+    // Two official endpoints to try
+    const HS_ENDPOINTS = {
+        lite: [
+            u => `https://secure.runescape.com/m=hiscore_oldschool/index_lite.ws?player=${u}`,
+            u => `https://services.runescape.com/m=hiscore_oldschool/index_lite.ws?player=${u}`
+        ],
+        html: [
+            u => `https://secure.runescape.com/m=hiscore_oldschool/hiscorepersonal?user1=${u}`,
+            u => `https://services.runescape.com/m=hiscore_oldschool/hiscorepersonal?user1=${u}`
+        ]
+    };
+
+    // Proxies that return CORS allowed responses
+    function proxyUrls(url) {
+        return [
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // primary
+            `https://cors.isomorphic-git.org/${url}`                        // fallback
+        ];
+    }
+
+    async function fetchTextThroughProxies(url) {
+        const proxies = proxyUrls(url);
+        let lastError = null;
+
+        for (const p of proxies) {
+            try {
+                const resp = await fetch(p, {
+                    mode: 'cors',
+                    cache: 'no-store',
+                    redirect: 'follow',
+                    referrerPolicy: 'no-referrer'
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const text = await resp.text();
+                if (!text || text.trim().length === 0) throw new Error('Empty response');
+                return text;
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        throw lastError || new Error('All proxies failed');
+    }
+
+    async function tryLite(username, setStatus) {
+        const ue = encodeURIComponent(username);
+        for (const build of HS_ENDPOINTS.lite) {
+            const target = build(ue);
+            setStatus(`Trying Lite API via ${new URL(target).host}...`);
+            try {
+                const text = await fetchTextThroughProxies(target);
+                const skillsLoaded = parseCSVData(text);
+                if (skillsLoaded > 0) return skillsLoaded;
+            } catch (e) {
+                // Try next variant
+            }
+        }
+        throw new Error('Lite API attempts failed');
+    }
+
+    async function tryHTML(username, setStatus) {
+        const ue = encodeURIComponent(username);
+        for (const build of HS_ENDPOINTS.html) {
+            const target = build(ue);
+            setStatus(`Trying web page via ${new URL(target).host}...`);
+            try {
+                const html = await fetchTextThroughProxies(target);
+                const skillsLoaded = scrapeHTMLData(html);
+                if (skillsLoaded > 0) return skillsLoaded;
+            } catch (e) {
+                // Try next variant
+            }
+        }
+        throw new Error('HTML scrape attempts failed');
+    }
+
+    // ---------- Your original functions with minor safety tweaks ----------
+
+    async function fetchHighscores() {
+        const username = document.getElementById('username').value.trim();
+        const fetchButton = document.getElementById('fetchButton');
+        const fetchStatus = document.getElementById('fetchStatus');
+
+        const setStatus = (msg, cls) => {
+            fetchStatus.textContent = msg;
+            fetchStatus.className = 'fetch-status' + (cls ? ' ' + cls : '');
+        };
+
+        if (!username) {
+            setStatus('Please enter a username', 'error');
+            return;
+        }
+
+        fetchButton.disabled = true;
+        setStatus('Fetching stats...', 'loading');
+
+        try {
+            // 1) Prefer official lite CSV through proxy
+            try {
+                const loaded = await tryLite(username, setStatus);
+                setStatus(`✅ Successfully loaded ${loaded} skills for ${username}`, 'success');
+                updateCalculations();
+                fetchButton.disabled = false;
+                return;
+            } catch (_) {
+                // fall through to HTML
+            }
+
+            // 2) Fallback to HTML page scraping through proxy
+            const loaded = await tryHTML(username, setStatus);
+            setStatus(`✅ Successfully loaded ${loaded} skills for ${username}`, 'success');
+            updateCalculations();
+        } catch (error) {
+            let msg = 'Unable to fetch stats from OSRS servers';
+            const lower = String(error && error.message || '').toLowerCase();
+            if (lower.includes('player not found') || lower.includes('private') || lower.includes('404')) {
+                msg = 'Player not found or profile is private';
+            }
+            setStatus(`❌ ${msg}`, 'error');
+        } finally {
+            fetchButton.disabled = false;
+        }
+    }
+
+    function parseCSVData(data) {
+        if (!data || !data.includes(',')) {
+            throw new Error('Player not found or profile is private');
+        }
+        const lines = data.trim().split('\n');
+        if (lines.length < 24) {
+            throw new Error('Insufficient data');
+        }
+
+        let skillsLoaded = 0;
+        for (let j = 1; j < Math.min(lines.length, highscoreSkillOrder.length); j++) {
+            const skillName = highscoreSkillOrder[j];
+            const parts = lines[j].split(',');
+            if (parts.length >= 3 && skills[skillName]) {
+                const experience = parseInt(parts[2]);
+                if (!isNaN(experience) && experience >= 0) {
+                    const inputElement = document.getElementById(`${skillName.toLowerCase()}-current`);
+                    if (inputElement) {
+                        inputElement.value = Math.max(0, experience);
+                        skillsLoaded++;
+                    }
+                }
+            }
+        }
+        return skillsLoaded;
+    }
+
+    function scrapeHTMLData(html) {
+        if (!html || html.includes('Player not found') || html.includes('404')) {
+            throw new Error('Player not found or profile is private');
+        }
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const tables = doc.querySelectorAll('table');
+        let skillsLoaded = 0;
+
+        let statsTable = null;
+        for (const table of tables) {
+            const rows = table.querySelectorAll('tr');
+            if (rows.length >= 20) {
+                statsTable = table;
+                break;
+            }
+        }
+        if (!statsTable) {
+            for (const table of tables) {
+                const tableText = table.textContent.toLowerCase();
+                if (tableText.includes('attack') && tableText.includes('defence') && tableText.includes('strength')) {
+                    statsTable = table;
+                    break;
+                }
+            }
+        }
+
+        if (statsTable) {
+            const rows = statsTable.querySelectorAll('tr');
+            for (const row of rows) {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 4) {
+                    let skillName = '';
+                    let experience = 0;
+                    for (let i = 0; i < Math.min(3, cells.length); i++) {
+                        const cellText = cells[i].textContent.trim();
+                        for (const [skill] of Object.entries(skills)) {
+                            if (cellText.toLowerCase() === skill.toLowerCase()) {
+                                skillName = skill;
+                                const expText = cells[cells.length - 1].textContent.trim().replace(/,/g, '');
+                                experience = parseInt(expText);
+                                break;
+                            }
+                        }
+                        if (skillName) break;
+                    }
+                    if (skillName && !isNaN(experience) && experience >= 0) {
+                        const inputElement = document.getElementById(`${skillName.toLowerCase()}-current`);
+                        if (inputElement) {
+                            inputElement.value = Math.max(0, experience);
+                            skillsLoaded++;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (skillsLoaded === 0) {
+            for (const [skillName] of Object.entries(skills)) {
+                const pattern = new RegExp(`${skillName}[^>]*>[^<]*<[^>]*>[^<]*<[^>]*>[^<]*<[^>]*>([\\d,]+)`, 'i');
+                const match = html.match(pattern);
+                if (match) {
+                    const experience = parseInt(match[1].replace(/,/g, ''));
+                    if (!isNaN(experience) && experience >= 0) {
+                        const inputElement = document.getElementById(`${skillName.toLowerCase()}-current`);
+                        if (inputElement) {
+                            inputElement.value = Math.max(0, experience);
+                            skillsLoaded++;
+                        }
+                    }
+                }
+            }
+        }
+
+        return skillsLoaded;
+    }
+
+    function initializeSkills() {
+        const skillsGrid = document.getElementById('skillsGrid');
+        const ephGrid = document.getElementById('ephGrid');
+
+        for (const [skillName, skillData] of Object.entries(skills)) {
+            const skillCard = document.createElement('div');
+            skillCard.className = 'skill-card';
+            skillCard.innerHTML = `
+                <div class="skill-header">
+                    <div class="skill-name" style="color: ${skillData.color}">${skillName}</div>
+                    <div class="eph-display">${skillData.eph.toLocaleString()} EPH</div>
+                </div>
+                <div class="skill-inputs">
+                    <div class="input-group">
+                        <label>Current XP</label>
+                        <input type="number" id="${skillName.toLowerCase()}-current" value="0" min="0" oninput="updateCalculations()">
+                    </div>
+                </div>
+                <div class="efficiency-display">
+                    <div class="efficiency-value" id="${skillName.toLowerCase()}-efficiency">0.0%</div>
+                    <div class="efficiency-label">True Efficiency</div>
+                </div>
+            `;
+            skillsGrid.appendChild(skillCard);
+
+            const ephItem = document.createElement('div');
+            ephItem.className = 'eph-item';
+            ephItem.style.borderLeftColor = skillData.color;
+            ephItem.innerHTML = `
+                <div class="eph-skill" style="color: ${skillData.color}">${skillName}</div>
+                <div class="eph-details">
+                    <div class="eph-rate">${skillData.eph.toLocaleString()}/hr</div>
+                    <div class="eph-method">${skillData.method}</div>
+                </div>
+            `;
+            ephGrid.appendChild(ephItem);
+        }
+    }
+
+    function getTotalHours() {
+        const days = parseInt(document.getElementById('days').value) || 0;
+        const hours = parseInt(document.getElementById('hours').value) || 0;
+        const minutes = parseInt(document.getElementById('minutes').value) || 0;
+        return days * 24 + hours + minutes / 60;
+    }
+
+    function getEfficiencyClass(efficiency) {
+        if (efficiency >= 90) return 'efficiency-excellent';
+        if (efficiency >= 75) return 'efficiency-good';
+        if (efficiency >= 50) return 'efficiency-average';
+        if (efficiency >= 25) return 'efficiency-poor';
+        return 'efficiency-very-poor';
+    }
+
+    function formatEfficiency(efficiency) {
+        if (efficiency > 100) {
+            return 'Lots';
+        }
+        return efficiency.toFixed(1) + '%';
+    }
+
+    function updateCalculations() {
+        const totalHours = getTotalHours();
+
+        if (totalHours === 0) {
+            for (const skillName of Object.keys(skills)) {
+                const efficiencyElement = document.getElementById(`${skillName.toLowerCase()}-efficiency`);
+                if (efficiencyElement) {
+                    efficiencyElement.textContent = '0.0%';
+                    efficiencyElement.className = 'efficiency-value';
+                }
+            }
+            const oe = document.getElementById('overallEfficiency');
+            oe.textContent = '0.0%';
+            oe.className = 'overall-efficiency';
+            return;
+        }
+
+        let totalExpGained = 0;
+        let totalOptimalExp = 0;
+
+        for (const [skillName, skillData] of Object.entries(skills)) {
+            const currentExp = parseInt(document.getElementById(`${skillName.toLowerCase()}-current`).value) || 0;
+            const expGained = currentExp;
+            const optimalExp = skillData.eph * totalHours;
+
+            let efficiency = 0;
+            if (optimalExp > 0 && expGained > 0) {
+                efficiency = (expGained / optimalExp) * 100;
+                totalExpGained += expGained;
+                totalOptimalExp += optimalExp;
+            }
+
+            const efficiencyElement = document.getElementById(`${skillName.toLowerCase()}-efficiency`);
+            if (efficiencyElement) {
+                efficiencyElement.textContent = formatEfficiency(efficiency);
+                efficiencyElement.className = 'efficiency-value ' + getEfficiencyClass(Math.min(efficiency, 100));
+            }
+        }
+
+        let overallEfficiency = 0;
+        if (totalOptimalExp > 0) {
+            overallEfficiency = (totalExpGained / totalOptimalExp) * 100;
+        }
+
+        const overallElement = document.getElementById('overallEfficiency');
+        overallElement.textContent = formatEfficiency(overallEfficiency);
+        overallElement.className = 'overall-efficiency ' + getEfficiencyClass(Math.min(overallEfficiency, 100));
+    }
+
+    window.addEventListener('load', function () {
+        initializeSkills();
+        updateCalculations();
+        document.getElementById('username').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                fetchHighscores();
+            }
+        });
+    });
+</script>
